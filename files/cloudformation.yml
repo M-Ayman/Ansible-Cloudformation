@@ -1,0 +1,266 @@
+Description:
+  This template deploys a VPC, with a pair of public and private subnets spread
+  across two Availability Zones. It deploys an Internet Gateway, with a default
+  route on the public subnets. It deploys a pair of NAT Gateways (one in each AZ),
+  and default routes for them in the private subnets.
+
+Parameters:
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.192.0.0/16
+
+  PublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.10.0/24
+
+
+  PrivateSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.192.20.0/24
+
+  InstanceType:
+    Description: Instance EC2 instance type
+    Type: String
+    Default: t2.micro
+
+  ImageId:
+    Description: Instance EC2 Image ID
+    Type: String
+    Default: ami-e251209a
+
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Subnet (AZ1)
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Subnet (AZ1)
+
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Routes (AZ1)
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+
+
+# public security group open port 22, 80
+  PublicSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: "web-sg"
+      GroupDescription: "Web SG"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '80'
+        ToPort: '80'
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC
+# private security group open only port 22
+  PrivateSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: "db-sg"
+      GroupDescription: "DB SG"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC
+
+  DBServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "false"
+          DeviceIndex: "0"
+          GroupSet:
+            - Ref: "PrivateSG"
+          SubnetId:
+            Ref: "PrivateSubnet1"
+      #SubnetId: !Ref PrivateSubnet1
+      ImageId: !Ref ImageId
+      KeyName: codedeploy
+      InstanceType: !Ref InstanceType
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+            - ""
+            -
+              - "#!/bin/bash -ex"
+              - "\n"
+              - "yum -y install mysql-server"
+              - "\n"
+              - "service mysqld start"
+              - "\n"
+              - "/sbin/chkconfig --levels 235 mysqld on"
+              - "\"\n"
+
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet:
+            - Ref: "PublicSG"
+          SubnetId:
+            Ref: "PublicSubnet1"
+      ImageId: !Ref ImageId
+      KeyName: codedeploy
+      InstanceType: !Ref InstanceType
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+            - ""
+            -
+              - "#!/bin/bash -ex"
+              - "\n"
+              - "yum -y install httpd"
+              - "\n"
+              - "service httpd start"
+              - "\n"
+              - "chkconfig httpd on"
+              - "\"\n"
+
+
+Outputs:
+  VPC:
+    Description: A reference to the created VPC
+    Value: !Ref VPC
+
+  PublicSubnets:
+    Description: A list of the public subnets
+    Value: !Join [ ",", [ !Ref PublicSubnet1 ]]
+
+  PrivateSubnets:
+    Description: A list of the private subnets
+    Value: !Join [ ",", [ !Ref PrivateSubnet1 ]]
+
+  PublicSubnet1:
+    Description: A reference to the public subnet in the 1st Availability Zone
+    Value: !Ref PublicSubnet1
+
+  PrivateSubnet1:
+    Description: A reference to the private subnet in the 1st Availability Zone
+    Value: !Ref PrivateSubnet1
+
+
+  PublicSG:
+    Description: Security group with ssh, http
+    Value: !Ref PublicSG
+
+  PrivateSG:
+    Description: Security group with with ssh
+    Value: !Ref PrivateSG
+
+  DBServer:
+    Description: MySQL DB Server
+    Value: !Ref DBServer
+
+  WebServer:
+    Description: Apache web server
+    Value: !Ref WebServer
